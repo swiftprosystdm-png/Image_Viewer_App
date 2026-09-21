@@ -152,8 +152,9 @@ REM  button can detect and download it automatically.
 REM
 REM  REQUIREMENTS:
 REM    - GitHub CLI (gh) installed: https://cli.github.com
-REM    - Already logged in:  gh auth login
-REM    - GitHub repo:  sarathimurugan247-spec/Image_Viewer_App
+REM    - Already logged in AS THE swiftprosystdm-png ACCOUNT:
+REM        gh auth login
+REM    - GitHub repo:  swiftprosystdm-png/Image_Viewer_App
 REM
 REM  HOW TO SET THE VERSION:
 REM    Edit the VERSION= line below before running build.bat.
@@ -162,7 +163,7 @@ REM    CURRENT_APP_VERSION in updater.py  (e.g. v1.1 / v2.0)
 REM ============================================================
 
 set "VERSION=vBeta"
-set "GITHUB_REPO=Astalakshmi18/Image_Viewer_App"
+set "GITHUB_REPO=swiftprosystdm-png/Image_Viewer_App"
 
 echo.
 echo ============================================================
@@ -202,18 +203,29 @@ echo  To repo : %GITHUB_REPO%
 echo  Tag     : %VERSION%
 echo.
 
-REM Create the GitHub release and upload the file in one command.
-REM --clobber replaces asset if the same tag already exists.
-gh release create "%VERSION%" "%UPLOAD_FILE%" ^
-    --repo "%GITHUB_REPO%" ^
-    --title "SPS TDM Image Viewer %VERSION%" ^
-    --notes "SPS TDM Image Viewer %VERSION% - New release.%NL%Users with the app installed will be notified automatically via Check for Updates." ^
-    --clobber
+REM "gh release create" FAILS with "already exists" if a release for this
+REM tag was already created before (e.g. from an earlier run) - it does
+REM NOT update it, even with --clobber (that flag only overwrites an
+REM asset of the same name, not a whole missing/incomplete release). So
+REM check first: if the release already exists, upload/replace the asset
+REM on it directly; only create a brand-new release if it doesn't exist
+REM yet. This makes re-running build.bat with the same VERSION safe.
+gh release view "%VERSION%" --repo "%GITHUB_REPO%" >nul 2>&1
+if not errorlevel 1 (
+    echo Release %VERSION% already exists - uploading/replacing the asset on it...
+    gh release upload "%VERSION%" "%UPLOAD_FILE%" --repo "%GITHUB_REPO%" --clobber
+) else (
+    gh release create "%VERSION%" "%UPLOAD_FILE%" ^
+        --repo "%GITHUB_REPO%" ^
+        --title "SPS TDM Image Viewer %VERSION%" ^
+        --notes "SPS TDM Image Viewer %VERSION% - New release.%NL%Users with the app installed will be notified automatically via Check for Updates." ^
+        --clobber
+)
 
 if errorlevel 1 (
     echo.
     echo [WARNING] GitHub release upload failed.
-    echo  - Make sure you are logged in:  gh auth login
+    echo  - Make sure you are logged in AS swiftprosystdm-png:  gh auth login
     echo  - Make sure the repo exists:  https://github.com/%GITHUB_REPO%
     echo  - Make sure you have push access to the repo.
 ) else (
