@@ -1,0 +1,5 @@
+echo build/ >> .gitignore
+echo dist/ >> .gitignore
+echo Output/ >> .gitignore
+echo *.spec >> .gitignore
+git add .gitignore
