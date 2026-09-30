@@ -45,7 +45,9 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 Name: "fileassoc"; Description: "Open .sps files with {#MyAppName} by double-clicking them"; GroupDescription: "Additional shortcuts:"
 
 [Files]
-Source: "dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+; --onedir build: copy the whole output folder (exe + its dependency
+; files/DLLs) that PyInstaller creates at dist\SPS_TDM_Image_Viewer\
+Source: "dist\SPS_TDM_Image_Viewer\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

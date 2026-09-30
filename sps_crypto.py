@@ -22,6 +22,21 @@ TAG_SIZE = 16
 PBKDF2_ITERATIONS = 100_000
 
 
+class SpsError(ValueError):
+    """Base exception for all .sps file errors."""
+    pass
+
+
+class SpsCorruptError(SpsError):
+    """Raised when .sps file is empty, truncated, or has invalid structure/header."""
+    pass
+
+
+class SpsAuthError(SpsError):
+    """Raised when passphrase is wrong or cryptographic authentication tag verification fails."""
+    pass
+
+
 def get_passphrase_salt(passphrase: str) -> bytes:
     """Generate a consistent 16-byte salt for a passphrase to enable instant key caching across files."""
     return hashlib.sha256(b"SPS_KEY_SALT_V1:" + passphrase.encode("utf-8")).digest()[:SALT_SIZE]
@@ -44,6 +59,8 @@ def is_sps_file(file_path: str) -> bool:
     if not os.path.exists(file_path):
         return False
     try:
+        if os.path.getsize(file_path) < len(MAGIC_HEADER):
+            return False
         with open(file_path, "rb") as f:
             header = f.read(len(MAGIC_HEADER))
             return header == MAGIC_HEADER
@@ -60,10 +77,14 @@ def decrypt_sps_file(
     if not os.path.isfile(sps_abs_path):
         raise FileNotFoundError(f".sps file not found: {sps_abs_path}")
 
+    file_size = os.path.getsize(sps_abs_path)
+    if file_size < 48:
+        raise SpsCorruptError(f"File is incomplete or empty ({file_size} bytes)")
+
     with open(sps_abs_path, "rb") as f:
         magic = f.read(len(MAGIC_HEADER))
         if magic != MAGIC_HEADER:
-            raise ValueError(f"Invalid file format: Header does not match {MAGIC_HEADER.decode()}")
+            raise SpsCorruptError(f"Invalid file format: Header does not match {MAGIC_HEADER.decode()}")
         
         salt = f.read(SALT_SIZE)
         nonce = f.read(NONCE_SIZE)
@@ -78,13 +99,22 @@ def decrypt_sps_file(
     try:
         payload = aesgcm.decrypt(nonce, encrypted_blob, MAGIC_HEADER)
     except Exception as e:
-        raise ValueError("Decryption failed. Invalid passphrase or corrupted file integrity.") from e
+        raise SpsAuthError("Decryption failed. Invalid passphrase or corrupted file integrity.") from e
+
+    if len(payload) < 4:
+        raise SpsCorruptError("Decrypted payload is incomplete.")
 
     meta_len = struct.unpack(">I", payload[:4])[0]
+    if len(payload) < 4 + meta_len:
+        raise SpsCorruptError("Decrypted payload metadata header is invalid.")
+
     meta_bytes = payload[4:4 + meta_len]
     image_bytes = payload[4 + meta_len:]
 
-    metadata = json.loads(meta_bytes.decode("utf-8")) if meta_bytes else {}
+    try:
+        metadata = json.loads(meta_bytes.decode("utf-8")) if meta_bytes else {}
+    except Exception:
+        metadata = {}
     return image_bytes, metadata
 
 

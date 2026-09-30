@@ -34,7 +34,7 @@ echo [3/4] Building the standalone .exe (this can take a few minutes)...
 echo.
 python build_exe.py
 
-if not exist "dist\SPS_TDM_Image_Viewer.exe" (
+if not exist "dist\SPS_TDM_Image_Viewer\SPS_TDM_Image_Viewer.exe" (
     echo.
     echo [WARNING] .exe build failed or was not found in dist\.
     echo Scroll up for the PyInstaller error output.
@@ -100,7 +100,9 @@ if defined ISCC (
 ) else (
     echo Inno Setup's compiler ^(ISCC.exe^) was not found automatically.
     echo Your standalone app .exe is still ready to use:
-    echo   %cd%\dist\SPS_TDM_Image_Viewer.exe
+    echo   %cd%\dist\SPS_TDM_Image_Viewer\SPS_TDM_Image_Viewer.exe
+    echo   ^(the WHOLE dist\SPS_TDM_Image_Viewer folder is needed -
+    echo    the .exe alone will not run without its neighbouring files^)
     echo.
     echo If Inno Setup IS installed on this PC but in a non-standard folder,
     echo you can still build the installer manually - this always works
@@ -128,11 +130,12 @@ if exist "Output\SPS_TDM_Image_Viewer_Setup.exe" (
     echo   %cd%\Output\SPS_TDM_Image_Viewer_Setup.exe
 ) else (
     echo No installer was built this time, so all you have is the plain
-    echo standalone .exe below. Sharing THIS file does NOT add a Start
+    echo standalone app folder below. Sharing it does NOT add a Start
     echo Menu entry and does NOT show up in Control Panel to uninstall -
-    echo it just runs directly, like a portable app:
+    echo it just runs directly, like a portable app. Zip and share the
+    echo WHOLE FOLDER ^(not just the .exe inside it^):
     echo.
-    echo   %cd%\dist\SPS_TDM_Image_Viewer.exe
+    echo   %cd%\dist\SPS_TDM_Image_Viewer
     echo.
     echo For the full install experience ^(Start Menu + Control Panel
     echo uninstall^), install Inno Setup from https://jrsoftware.org/isdl.php

@@ -15,9 +15,9 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 # ==========================================
 # CONFIGURATION
 # ==========================================
-GITHUB_OWNER = "Astalakshmi18"
+GITHUB_OWNER = "swiftprosystdm-png"
 GITHUB_REPO = "Image_Viewer_App"
-CURRENT_APP_VERSION = "vBeta"
+CURRENT_APP_VERSION = "vvBeta"
 
 
 def parse_version(version_str):
@@ -61,9 +61,10 @@ def get_executable_name():
 class CheckUpdateWorker(QThread):
     finished = pyqtSignal(bool, str, str, str, str)  # success, msg, download_url, asset_name, latest_version
     
-    def __init__(self, silent=False):
+    def __init__(self, silent=False, current_version=None):
         super().__init__()
         self.silent = silent
+        self.current_version = current_version or CURRENT_APP_VERSION
         
     def run(self):
         repos_to_try = [GITHUB_REPO, "Image_Viewer_App", "SPS_TDM_Image_Viewer_App", "Image Viwer", "Image_Viewer", "Image-Viewer"]
@@ -126,12 +127,12 @@ class CheckUpdateWorker(QThread):
                     pass
 
         if not found_releases:
-            self.finished.emit(False, f"You are running version {CURRENT_APP_VERSION}.\nNo published release tags found on GitHub repository.", "", "", "")
+            self.finished.emit(False, f"You are running version {self.current_version}.\nNo published release tags found on GitHub repository.", "", "", "")
             return
 
         try:
             newest_release = None
-            newest_ver = CURRENT_APP_VERSION
+            newest_ver = self.current_version
 
             for rel in found_releases:
                 tag = rel.get("tag_name", "") or rel.get("name", "")
@@ -139,7 +140,7 @@ class CheckUpdateWorker(QThread):
                     newest_ver = tag
                     newest_release = rel
 
-            if newest_release and is_newer_version(newest_ver, CURRENT_APP_VERSION):
+            if newest_release and is_newer_version(newest_ver, self.current_version):
                 download_url = newest_release.get("direct_exe_url")
                 asset_name = newest_release.get("asset_name")
 
@@ -175,7 +176,9 @@ class CheckUpdateWorker(QThread):
                         f"SPS_TDM_Image_Viewer_{newest_ver}.exe",
                         f"SPS_Image_Viewer_Setup_{newest_ver}.exe",
                         f"SPS_Image_Viewer_{newest_ver}.exe",
+                        "SPS_TDM_Image_Viewer_Setup.exe",
                         "SPS_Image_Viewer_Setup.exe",
+                        "SPS_TDM_Image_Viewer.exe",
                         "SPS_Image_Viewer.exe",
                         "setup.exe"
                     ]
@@ -196,8 +199,7 @@ class CheckUpdateWorker(QThread):
 
                 self.finished.emit(True, f"New version ({newest_ver}) is available!", download_url, asset_name, newest_ver)
             else:
-                latest_found = found_releases[0].get("tag_name", CURRENT_APP_VERSION)
-                self.finished.emit(False, f"You are running the latest version ({CURRENT_APP_VERSION}).", "", "", "")
+                self.finished.emit(False, f"You are running the latest version ({self.current_version}).", "", "", "")
                 
         except Exception as e:
             self.finished.emit(False, f"Could not check for updates.\nError: {e}", "", "", "")
@@ -207,10 +209,10 @@ class CheckUpdateWorker(QThread):
 _update_worker = None
 
 
-def check_for_updates_async(parent=None, silent=False, callback=None):
+def check_for_updates_async(parent=None, silent=False, callback=None, current_version=None):
     """Asynchronously checks GitHub repository releases for updates."""
     global _update_worker
-    _update_worker = CheckUpdateWorker(silent)
+    _update_worker = CheckUpdateWorker(silent, current_version=current_version)
     
     def on_finished(success, msg, download_url, asset_name, latest_version):
         if callback:

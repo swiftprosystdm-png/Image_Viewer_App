@@ -415,6 +415,7 @@ class ImageAdjustmentSidebar(QFrame):
     """Right-side image adjustments panel (Ctrl + L) matching ACDSee Edit Panel."""
 
     adjustments_changed = pyqtSignal()
+    adjustments_settled = pyqtSignal()
     close_requested = pyqtSignal()
     save_requested = pyqtSignal()
     save_as_requested = pyqtSignal()
@@ -693,7 +694,7 @@ class ImageAdjustmentSidebar(QFrame):
         self.btn_group_auto = QButtonGroup(self)
         self.btn_group_auto.addButton(self.radio_auto_contrast)
         self.btn_group_auto.addButton(self.radio_auto_contrast_color)
-        self.btn_group_auto.buttonToggled.connect(lambda btn, checked: self._commit_change() if checked else None)
+        self.btn_group_auto.buttonToggled.connect(self._on_auto_radio_toggled)
 
         radio_layout.addWidget(self.radio_auto_contrast)
         radio_layout.addWidget(self.radio_auto_contrast_color)
@@ -1271,14 +1272,21 @@ class ImageAdjustmentSidebar(QFrame):
         if qimg.isNull():
             return
 
-        qimg_32 = qimg.convertToFormat(QImage.Format.Format_ARGB32)
+        # Lightning-fast downsampling to preview resolution before ARGB32 conversion (<1ms)
+        # Prevents high-res images (50MP+) from locking the GUI thread and triggering "Not Responding"
+        if qimg.width() > 512 or qimg.height() > 512:
+            qimg_sub = qimg.scaled(512, 512, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.FastTransformation)
+        else:
+            qimg_sub = qimg
+
+        qimg_32 = qimg_sub.convertToFormat(QImage.Format.Format_ARGB32)
         ptr = qimg_32.bits()
         ptr.setsize(qimg_32.sizeInBytes())
         arr = np.frombuffer(ptr, dtype=np.uint8)
 
         total_pixels = len(arr) // 4
-        if total_pixels > 500000:
-            stride = total_pixels // 500000
+        if total_pixels > 250000:
+            stride = total_pixels // 250000
             b = arr[0::4 * stride]
             g = arr[1::4 * stride]
             r = arr[2::4 * stride]
@@ -1287,7 +1295,7 @@ class ImageAdjustmentSidebar(QFrame):
             g = arr[1::4]
             r = arr[2::4]
 
-        # Fast integer approximation: (299*R + 587*G + 114*B) >> 10 (<1ms)
+        # Fast integer approximation: (299*R + 587*G + 114*B) >> 10 (<0.2ms)
         luma = ((299 * r.astype(np.uint32) + 587 * g.astype(np.uint32) + 114 * b.astype(np.uint32)) >> 10).astype(np.uint8)
 
         self._cached_histograms = {
@@ -1336,6 +1344,7 @@ class ImageAdjustmentSidebar(QFrame):
         """)
         cmb.addItems(presets)
         cmb.currentTextChanged.connect(on_select_callback)
+        cmb.activated.connect(lambda idx: on_select_callback(cmb.itemText(idx)))
         row.addWidget(cmb, stretch=1)
 
         btn_save = QPushButton("💾")
@@ -1461,17 +1470,34 @@ class ImageAdjustmentSidebar(QFrame):
         card_layout.addLayout(row)
         return card
 
+    def _on_auto_radio_toggled(self, button, checked: bool):
+        if not checked:
+            return
+        if hasattr(self, "slider_auto_exp") and self.slider_auto_exp.value() == 0:
+            self.slider_auto_exp.blockSignals(True)
+            self.slider_auto_exp.setValue(50)
+            self.slider_auto_exp.blockSignals(False)
+            if hasattr(self, "spin_auto_exp"):
+                self.spin_auto_exp.blockSignals(True)
+                self.spin_auto_exp.setValue(50)
+                self.spin_auto_exp.blockSignals(False)
+        self.adjustments_changed.emit()
+        self._commit_change()
+
     # -- Preset handlers --------------------------------------------------
     def _on_auto_exp_preset_changed(self, name: str):
         if name == "Boost contrast":
-            self.slider_auto_exp.setValue(50)
+            # Higher strength + color channel stretching for a vivid, punchy look
+            self.slider_auto_exp.setValue(75)
             self.radio_auto_contrast_color.setChecked(True)
         elif name == "Auto Contrast":
+            # Moderate strength, luminance-only stretch (no colour shift)
             self.slider_auto_exp.setValue(50)
             self.radio_auto_contrast.setChecked(True)
         elif name == "Default":
-            self.slider_auto_exp.setValue(0)
-            self.radio_auto_contrast_color.setChecked(True)
+            self.reset_auto_exposure_tab()
+            return
+        self.adjustments_changed.emit()
         self._commit_change()
 
     def _on_brightness_preset_changed(self, name: str):
@@ -1484,9 +1510,9 @@ class ImageAdjustmentSidebar(QFrame):
             self.slider_contrast.setValue(-10)
             self.slider_gamma.setValue(65)
         elif name == "Default":
-            self.slider_bright.setValue(0)
-            self.slider_contrast.setValue(0)
-            self.slider_gamma.setValue(50)
+            self.reset_brightness_tab()
+            return
+        self.adjustments_changed.emit()
         self._commit_change()
 
     def _on_levels_preset_changed(self, name: str):
@@ -1549,6 +1575,7 @@ class ImageAdjustmentSidebar(QFrame):
     # -- Action buttons & History -----------------------------------------
     def _commit_change(self):
         """Called whenever an adjustment interaction finishes (slider released, spinbox entered, etc.)."""
+        self.adjustments_settled.emit()
         if not hasattr(self, "_last_committed_state") or self._last_committed_state is None:
             self._last_committed_state = self.get_full_state()
             return

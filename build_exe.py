@@ -46,7 +46,9 @@ def build():
         print(f"Warning: Keyboard_Shortcuts.txt not found: {SHORTCUTS_PATH}")
 
     # Check if target dist exe is still locked
-    dist_exe = os.path.join(BASE_DIR, "dist", f"{EXE_NAME}.exe")
+    # NOTE: --onedir puts the exe inside dist\<EXE_NAME>\<EXE_NAME>.exe
+    # (not directly in dist\ like --onefile did).
+    dist_exe = os.path.join(BASE_DIR, "dist", EXE_NAME, f"{EXE_NAME}.exe")
     if os.path.exists(dist_exe):
         try:
             with open(dist_exe, "a+b"):
@@ -60,7 +62,7 @@ def build():
     cmd = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm",
-        "--onefile",
+        "--onedir",
         "--windowed",
         f"--name={EXE_NAME}",
         f"--icon={ICO_PATH}",
@@ -90,13 +92,14 @@ def build():
         print("\n[FAILED] PyInstaller build failed with exit code:", result.returncode)
         sys.exit(result.returncode)
 
-    dist_exe = os.path.join(BASE_DIR, "dist", f"{EXE_NAME}.exe")
+    dist_exe = os.path.join(BASE_DIR, "dist", EXE_NAME, f"{EXE_NAME}.exe")
     if os.path.exists(dist_exe):
         size_mb = os.path.getsize(dist_exe) / (1024 * 1024)
         print("\n" + "=" * 60)
         print("[SUCCESS] Build completed successfully!")
         print(f"Executable: {dist_exe}")
-        print(f"Size: {size_mb:.2f} MB")
+        print(f"(folder: {os.path.dirname(dist_exe)})")
+        print(f"Exe Size: {size_mb:.2f} MB")
         print("=" * 60)
     else:
         print("\n[WARNING] dist exe not found at expected location:", dist_exe)

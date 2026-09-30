@@ -5,14 +5,16 @@ SPS IMAGE VIEWER - KEYBOARD SHORTCUTS
 [NAVIGATION]
   Next Image / Next PDF Page     : Ctrl+N  /  Space  /  PageDown  /  Right Arrow
   Previous Image / Prev PDF Page : Ctrl+P  /  Backspace  /  PageUp  /  Left Arrow
+  Open Next in New Window        : Ctrl+Shift+N
   Scroll / Pan Image (Normal)    : Arrow Keys (Up, Down, Left, Right)
   Fast Pan Image (Turbo / ACDSee): Ctrl + Arrow Keys (Up, Down, Left, Right)
 
 [ZOOMING]
-  Zoom In                        : Ctrl + '+'  /  '+'
+  Zoom In                        : Ctrl + '+'  /  '+'  /  '='
   Zoom Out                       : Ctrl + '-'  /  '-'
-  Fit to Window                  : Ctrl+F
-  Actual Size (100%)             : / (Slash)
+  Fit to Window                  : Ctrl+F  /  Ctrl+0  /  0
+  Actual Size (100%)             : / (Slash)  /  Ctrl+1  /  1
+  Toggle Fit / 100% Zoom         : Enter  /  Return  /  Double-Click
   Smooth Zoom                    : Mouse Scroll Wheel
 
 [IMAGE ADJUSTMENTS & EFFECTS]
@@ -26,11 +28,15 @@ SPS IMAGE VIEWER - KEYBOARD SHORTCUTS
   Redo Adjustment                : Ctrl+Y  /  Ctrl+Shift+Z
 
 [FILE OPERATIONS & GENERAL]
+  Open File...                   : Ctrl+O
   Save Image / Adjustments       : Ctrl+S
   Save Copy As...                : Ctrl+Shift+S
   Discard Adjustments            : Ctrl+D
+  Copy File Path                 : Ctrl+Shift+C
+  File Properties                : Alt+Enter
   Rename File                    : F2
   Delete File                    : Delete
-  Keyboard Shortcuts Reference   : Ctrl+K
-  Exit / Close Window            : Escape  /  Ctrl+Q
+  Keyboard Shortcuts Reference   : Ctrl+K  /  F1
+  Exit / Close Window            : Escape  /  Ctrl+Q  /  Ctrl+W
   Close Sidebar / Cancel Tool    : Escape (when sidebar is open)
+

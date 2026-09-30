@@ -1,5 +1,18 @@
-echo build/ >> .gitignore
-echo dist/ >> .gitignore
-echo Output/ >> .gitignore
-echo *.spec >> .gitignore
-git add .gitignore
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+
+# PyInstaller / Build artifacts
+build/
+dist/
+Output/
+*.spec
+
+# System / IDE
+.vscode/
+.idea/
+.system_generated/
+.agents/
+scratch/
