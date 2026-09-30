@@ -27,11 +27,14 @@ def parse_version(version_str):
     """
     if not version_str:
         return (0, 0, 0, 0)
+    import re
     v = str(version_str).strip().lstrip("vV_").lower()
     if "alpha" in v:
-        return (1, 0, 0, 0)
+        nums = [int(s) for s in re.findall(r'\d+', v)]
+        return (1, nums[0] if nums else 0, 0, 0)
     if "beta" in v:
-        return (2, 0, 0, 0)
+        nums = [int(s) for s in re.findall(r'\d+', v)]
+        return (2, nums[0] if nums else 0, 0, 0)
     
     # Numerical release versioning
     nums = []
