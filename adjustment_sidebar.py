@@ -1486,52 +1486,90 @@ class ImageAdjustmentSidebar(QFrame):
 
     # -- Preset handlers --------------------------------------------------
     def _on_auto_exp_preset_changed(self, name: str):
-        if name == "Boost contrast":
-            # Higher strength + color channel stretching for a vivid, punchy look
-            self.slider_auto_exp.setValue(75)
-            self.radio_auto_contrast_color.setChecked(True)
-        elif name == "Auto Contrast":
-            # Moderate strength, luminance-only stretch (no colour shift)
-            self.slider_auto_exp.setValue(50)
-            self.radio_auto_contrast.setChecked(True)
-        elif name == "Default":
-            self.reset_auto_exposure_tab()
-            return
+        widgets = [self.slider_auto_exp, self.spin_auto_exp]
+        for w in widgets:
+            w.blockSignals(True)
+        try:
+            if name == "Boost contrast":
+                self.slider_auto_exp.setValue(75)
+                self.spin_auto_exp.setValue(75)
+                self.radio_auto_contrast_color.setChecked(True)
+            elif name == "Auto Contrast":
+                self.slider_auto_exp.setValue(50)
+                self.spin_auto_exp.setValue(50)
+                self.radio_auto_contrast.setChecked(True)
+            elif name == "Default":
+                for w in widgets:
+                    w.blockSignals(False)
+                self.reset_auto_exposure_tab()
+                return
+        finally:
+            for w in widgets:
+                w.blockSignals(False)
         self.adjustments_changed.emit()
         self._commit_change()
 
     def _on_brightness_preset_changed(self, name: str):
-        if name == "Boost contrast":
-            self.slider_bright.setValue(0)
-            self.slider_contrast.setValue(25)
-            self.slider_gamma.setValue(50)
-        elif name == "Brighten shadows":
-            self.slider_bright.setValue(15)
-            self.slider_contrast.setValue(-10)
-            self.slider_gamma.setValue(65)
-        elif name == "Default":
-            self.reset_brightness_tab()
-            return
+        widgets = [self.slider_bright, self.spin_bright, self.slider_contrast, self.spin_contrast, self.slider_gamma, self.spin_gamma]
+        for w in widgets:
+            w.blockSignals(True)
+        try:
+            if name == "Boost contrast":
+                self.slider_bright.setValue(0)
+                self.spin_bright.setValue(0)
+                self.slider_contrast.setValue(25)
+                self.spin_contrast.setValue(25)
+                self.slider_gamma.setValue(50)
+                self.spin_gamma.setValue(50)
+                if hasattr(self, 'lbl_gamma'):
+                    self.lbl_gamma.setText("Gamma (1.00)")
+            elif name == "Brighten shadows":
+                self.slider_bright.setValue(15)
+                self.spin_bright.setValue(15)
+                self.slider_contrast.setValue(-10)
+                self.spin_contrast.setValue(-10)
+                self.slider_gamma.setValue(65)
+                self.spin_gamma.setValue(65)
+                if hasattr(self, 'lbl_gamma'):
+                    self.lbl_gamma.setText(f"Gamma ({65 / 50.0:.2f})")
+            elif name == "Default":
+                for w in widgets:
+                    w.blockSignals(False)
+                self.reset_brightness_tab()
+                return
+        finally:
+            for w in widgets:
+                w.blockSignals(False)
         self.adjustments_changed.emit()
         self._commit_change()
 
     def _on_levels_preset_changed(self, name: str):
-        if name == "Brighten shadows":
-            self.spin_shadows.setValue(0)
-            self.spin_midtones_val.setValue(1.30)
-            self.spin_highlights.setValue(255)
-        elif name == "Darken":
-            self.spin_shadows.setValue(0)
-            self.spin_midtones_val.setValue(0.80)
-            self.spin_highlights.setValue(255)
-        elif name == "Midtones only":
-            self.spin_shadows.setValue(0)
-            self.spin_midtones_val.setValue(1.15)
-            self.spin_highlights.setValue(255)
-        elif name == "Default":
-            self.spin_shadows.setValue(0)
-            self.spin_midtones_val.setValue(1.00)
-            self.spin_highlights.setValue(255)
+        if not hasattr(self, 'spin_shadows') or not hasattr(self, 'spin_midtones_val') or not hasattr(self, 'spin_highlights'):
+            return
+        widgets = [self.spin_shadows, self.spin_midtones_val, self.spin_highlights]
+        for w in widgets:
+            w.blockSignals(True)
+        try:
+            if name == "Brighten shadows":
+                self.spin_shadows.setValue(0)
+                self.spin_midtones_val.setValue(1.30)
+                self.spin_highlights.setValue(255)
+            elif name == "Darken":
+                self.spin_shadows.setValue(0)
+                self.spin_midtones_val.setValue(0.80)
+                self.spin_highlights.setValue(255)
+            elif name == "Midtones only":
+                self.spin_shadows.setValue(0)
+                self.spin_midtones_val.setValue(1.15)
+                self.spin_highlights.setValue(255)
+            elif name == "Default":
+                self.spin_shadows.setValue(0)
+                self.spin_midtones_val.setValue(1.00)
+                self.spin_highlights.setValue(255)
+        finally:
+            for w in widgets:
+                w.blockSignals(False)
+        self.adjustments_changed.emit()
         self._commit_change()
 
     def _on_curves_preset_changed(self, name: str):

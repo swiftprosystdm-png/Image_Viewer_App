@@ -236,6 +236,7 @@ class ImagePrefetchQueueWorker(QObject):
         self._running = True
         self.require_full: bool = False
         self._workers: List[ImagePrefetchSubWorker] = [
+            ImagePrefetchSubWorker(self),
             ImagePrefetchSubWorker(self)
         ]
 
@@ -341,7 +342,7 @@ class ImagePrefetchQueueWorker(QObject):
                 qimg, metadata = _background_decode_to_qimage(next_path, curr_pass, max_dim=0)
                 with self._lock:
                     self._completed_cache[next_path] = (qimg, metadata)
-                    while len(self._completed_cache) > 2:
+                    while len(self._completed_cache) > 4:
                         oldest_key = next(iter(self._completed_cache))
                         self._completed_cache.pop(oldest_key, None)
                     self._last_completed = {"path": next_path, "result": None}
@@ -415,6 +416,354 @@ class FullResPromotionWorker(QThread):
 
             if qimg and not qimg.isNull() and not self.isInterruptionRequested():
                 self.promoted.emit(self.file_path, qimg)
+        except Exception:
+            pass
+
+
+def _compute_adjustments_fast(base_qimg: QImage, p: dict, is_inverted: bool = False, cached_luma = None, check_interrupted = None) -> QImage:
+    """
+    Ultra-Fast C-Level Vectorized NumPy Multi-Channel LUT Engine (<1ms latency).
+    Combines Invert, Brightness, Contrast, Gamma, Per-Channel RGB Levels, Per-Channel Curves.
+    """
+    if not base_qimg or base_qimg.isNull():
+        return base_qimg
+    if check_interrupted and check_interrupted():
+        return base_qimg
+
+    auto_exp = p.get("auto_exposure", False)
+    auto_exp_strength = p.get("auto_exposure_strength", 0)  # 0 to 100
+    bright = p.get("brightness", 0)        # -100 to 100
+    contrast = p.get("contrast", 0)        # -100 to 100
+    gamma = p.get("gamma", 1.0)             # 0.1 to 3.0
+    grayscale = p.get("grayscale", False)
+    exposure_warning = p.get("exposure_warning", False)
+
+    levels = p.get("levels", {})
+    lum_lev = levels.get("Luminance", {"shadows": p.get("black_point", 0), "midtones": p.get("midtone_val", 1.0), "highlights": p.get("white_point", 255)})
+    red_lev = levels.get("Red", {"shadows": 0, "midtones": 1.0, "highlights": 255})
+    grn_lev = levels.get("Green", {"shadows": 0, "midtones": 1.0, "highlights": 255})
+    blu_lev = levels.get("Blue", {"shadows": 0, "midtones": 1.0, "highlights": 255})
+
+    curve_luts = p.get("curve_luts", {})
+    rgb_curve = curve_luts.get("RGB", p.get("curve_lut", None))
+    red_curve = curve_luts.get("Red", None)
+    grn_curve = curve_luts.get("Green", None)
+    blu_curve = curve_luts.get("Blue", None)
+
+    # Check if per-channel levels or curves are non-neutral
+    has_channel_levels = (
+        red_lev["shadows"] > 0 or red_lev["highlights"] < 255 or abs(red_lev["midtones"] - 1.0) > 0.01 or
+        grn_lev["shadows"] > 0 or grn_lev["highlights"] < 255 or abs(grn_lev["midtones"] - 1.0) > 0.01 or
+        blu_lev["shadows"] > 0 or blu_lev["highlights"] < 255 or abs(blu_lev["midtones"] - 1.0) > 0.01
+    )
+    has_curves = (rgb_curve is not None or red_curve is not None or grn_curve is not None or blu_curve is not None)
+
+    is_neutral = (
+        not is_inverted and not auto_exp and not grayscale and not exposure_warning
+        and not has_curves and not has_channel_levels
+        and bright == 0 and contrast == 0
+        and abs(gamma - 1.0) <= 0.01
+        and lum_lev["shadows"] <= 0 and lum_lev["highlights"] >= 255
+        and abs(lum_lev["midtones"] - 1.0) <= 0.01
+    )
+    if is_neutral:
+        return base_qimg
+
+    out = base_qimg.convertToFormat(QImage.Format.Format_ARGB32)
+    ptr = out.bits()
+    ptr.setsize(out.sizeInBytes())
+    arr = np.frombuffer(ptr, dtype=np.uint8)
+
+    if check_interrupted and check_interrupted():
+        return out
+
+    # Auto Exposure Calculation
+    auto_contrast_color = p.get("auto_contrast_color", True)
+    if auto_exp and auto_exp_strength != 0:
+        factor = auto_exp_strength / 100.0
+        r_u = arr[2::4]
+        g_u = arr[1::4]
+        b_u = arr[0::4]
+
+        if factor > 0:
+            f = min(1.0, factor)
+            indices = np.arange(256, dtype=np.float32)
+            if auto_contrast_color:
+                def _get_channel_limits(ch):
+                    sub = ch[::16] if len(ch) > 40000 else ch
+                    hist = np.bincount(sub, minlength=256)
+                    cum = np.cumsum(hist)
+                    tot = cum[-1]
+                    if tot == 0:
+                        return 0, 255
+                    p_min = int(np.searchsorted(cum, tot * 0.01))
+                    p_max = int(np.searchsorted(cum, tot * 0.99))
+                    return p_min, max(p_min + 1, p_max)
+
+                r_min, r_max = _get_channel_limits(r_u)
+                g_min, g_max = _get_channel_limits(g_u)
+                b_min, b_max = _get_channel_limits(b_u)
+
+                lut_r = np.clip((indices - r_min) * (255.0 / float(r_max - r_min)), 0.0, 255.0)
+                lut_g = np.clip((indices - g_min) * (255.0 / float(g_max - g_min)), 0.0, 255.0)
+                lut_b = np.clip((indices - b_min) * (255.0 / float(b_max - b_min)), 0.0, 255.0)
+
+                r_s = lut_r[r_u]
+                g_s = lut_g[g_u]
+                b_s = lut_b[b_u]
+
+                luma_s = 0.299 * r_s + 0.587 * g_s + 0.114 * b_s
+                sat = 1.0 + 0.50 * f
+                r_col = np.clip(luma_s + sat * (r_s - luma_s), 0.0, 255.0)
+                g_col = np.clip(luma_s + sat * (g_s - luma_s), 0.0, 255.0)
+                b_col = np.clip(luma_s + sat * (b_s - luma_s), 0.0, 255.0)
+
+                arr[2::4] = np.clip((1.0 - f) * r_u.astype(np.float32) + f * r_col, 0, 255).astype(np.uint8)
+                arr[1::4] = np.clip((1.0 - f) * g_u.astype(np.float32) + f * g_col, 0, 255).astype(np.uint8)
+                arr[0::4] = np.clip((1.0 - f) * b_u.astype(np.float32) + f * b_col, 0, 255).astype(np.uint8)
+            else:
+                sub_r = r_u[::16].astype(np.float32) if len(r_u) > 40000 else r_u.astype(np.float32)
+                sub_g = g_u[::16].astype(np.float32) if len(g_u) > 40000 else g_u.astype(np.float32)
+                sub_b = b_u[::16].astype(np.float32) if len(b_u) > 40000 else b_u.astype(np.float32)
+                sub_y = (0.299 * sub_r + 0.587 * sub_g + 0.114 * sub_b).astype(np.uint8)
+
+                hist_y = np.bincount(sub_y, minlength=256)
+                cum_y = np.cumsum(hist_y)
+                tot_y = cum_y[-1]
+                if tot_y > 0:
+                    y_min = int(np.searchsorted(cum_y, tot_y * 0.01))
+                    y_max = int(np.searchsorted(cum_y, tot_y * 0.99))
+                else:
+                    y_min, y_max = 0, 255
+                y_max = max(y_min + 1, y_max)
+
+                scale_y = 255.0 / float(y_max - y_min)
+                stretched = np.clip((indices - y_min) * scale_y, 0.0, 255.0)
+                norm = stretched / 255.0
+                contrasted = 255.0 * (norm * norm * (3.0 - 2.0 * norm))
+                lut_contrast = np.clip((1.0 - f) * indices + f * contrasted, 0.0, 255.0).astype(np.uint8)
+
+                arr[2::4] = lut_contrast[r_u]
+                arr[1::4] = lut_contrast[g_u]
+                arr[0::4] = lut_contrast[b_u]
+        else:
+            f = max(-1.0, factor)
+            target = 128.0
+            arr[2::4] = np.clip((1.0 + f) * r_u.astype(np.float32) + (-f) * target, 0, 255).astype(np.uint8)
+            arr[1::4] = np.clip((1.0 + f) * g_u.astype(np.float32) + (-f) * target, 0, 255).astype(np.uint8)
+            arr[0::4] = np.clip((1.0 + f) * b_u.astype(np.float32) + (-f) * target, 0, 255).astype(np.uint8)
+
+    if check_interrupted and check_interrupted():
+        return out
+
+    # 1. Base Master LUT (Invert, Contrast, Brightness, Master Gamma, Master Luminance Levels)
+    base_lut = np.arange(256, dtype=np.float32)
+
+    if is_inverted:
+        base_lut = 255.0 - base_lut
+
+    black_pt = lum_lev["shadows"]
+    white_pt = lum_lev["highlights"]
+    midtone_val = lum_lev["midtones"]
+
+    if white_pt > black_pt and (black_pt > 0 or white_pt < 255):
+        base_lut = np.clip((base_lut - black_pt) * (255.0 / max(1.0, float(white_pt - black_pt))), 0.0, 255.0)
+
+    if abs(midtone_val - 1.0) > 0.01 and midtone_val > 0.05:
+        lut_norm = np.clip(base_lut / 255.0, 0.0, 1.0)
+        base_lut = np.clip((lut_norm ** (1.0 / midtone_val)) * 255.0, 0.0, 255.0)
+
+    if contrast != 0:
+        c_factor = (259.0 * (contrast + 255.0)) / (255.0 * (259.0 - contrast))
+        base_lut = np.clip(c_factor * (base_lut - 128.0) + 128.0, 0.0, 255.0)
+
+    if bright != 0:
+        base_lut = np.clip(base_lut + (bright * 1.5), 0.0, 255.0)
+
+    if gamma > 0 and abs(gamma - 1.0) > 0.01:
+        lut_norm = np.clip(base_lut / 255.0, 0.0, 1.0)
+        base_lut = np.clip((lut_norm ** (1.0 / gamma)) * 255.0, 0.0, 255.0)
+
+    if rgb_curve is not None:
+        base_lut = rgb_curve[np.clip(base_lut, 0, 255).astype(np.uint8)].astype(np.float32)
+
+    # 2. Branch Per-Channel LUTs for Red, Green, Blue
+    def _apply_channel_levels_and_curve(in_lut: np.ndarray, lev: dict, ch_curve: Optional[np.ndarray]) -> np.ndarray:
+        ch_lut = in_lut.copy()
+        s = lev.get("shadows", 0)
+        h = lev.get("highlights", 255)
+        m = lev.get("midtones", 1.0)
+        if h > s and (s > 0 or h < 255):
+            ch_lut = np.clip((ch_lut - s) * (255.0 / max(1.0, float(h - s))), 0.0, 255.0)
+        if abs(m - 1.0) > 0.01 and m > 0.05:
+            norm = np.clip(ch_lut / 255.0, 0.0, 1.0)
+            ch_lut = np.clip((norm ** (1.0 / m)) * 255.0, 0.0, 255.0)
+        ch_uint8 = np.clip(ch_lut, 0, 255).astype(np.uint8)
+        if ch_curve is not None:
+            ch_uint8 = ch_curve[ch_uint8]
+        return ch_uint8
+
+    lut_r = _apply_channel_levels_and_curve(base_lut, red_lev, red_curve)
+    lut_g = _apply_channel_levels_and_curve(base_lut, grn_lev, grn_curve)
+    lut_b = _apply_channel_levels_and_curve(base_lut, blu_lev, blu_curve)
+
+    # 3. Apply vectorized LUTs to C byte buffer only if LUT is non-neutral
+    has_lut_changes = (
+        is_inverted or auto_exp or bright != 0 or contrast != 0
+        or abs(gamma - 1.0) > 0.01 or lum_lev["shadows"] > 0
+        or lum_lev["highlights"] < 255 or abs(lum_lev["midtones"] - 1.0) > 0.01
+        or has_channel_levels or has_curves
+    )
+    if has_lut_changes:
+        arr[0::4] = lut_b[arr[0::4]]  # Blue
+        arr[1::4] = lut_g[arr[1::4]]  # Green
+        arr[2::4] = lut_r[arr[2::4]]  # Red
+
+    if check_interrupted and check_interrupted():
+        return out
+
+    # 4. Grayscale & Binary Black & White
+    if grayscale:
+        w, h = out.width(), out.height()
+        pil_luma = PILImage.frombuffer('RGBA', (w, h), arr, 'raw', 'BGRA', 0, 1).convert('L')
+        luma_arr = np.asarray(pil_luma).ravel()
+
+        gray_mode = p.get("grayscale_mode", "full_range")
+        if gray_mode == "binary":
+            thresh = int(p.get("bw_threshold", 128))
+            bw_lut = np.zeros(256, dtype=np.uint8)
+            bw_lut[thresh:] = 255
+            luma_out = bw_lut[luma_arr]
+        else:
+            sub_luma = luma_arr[::32] if len(luma_arr) > 40000 else luma_arr
+            counts = np.bincount(sub_luma, minlength=256)
+            total_pixels = len(sub_luma)
+            cum = np.cumsum(counts)
+
+            peak_idx = int(np.argmax(counts))
+            near_peak = counts[max(0, peak_idx - 15):min(256, peak_idx + 15)].sum()
+            is_doc_light = (peak_idx > 140 and near_peak / max(1, total_pixels) > 0.30)
+            is_doc_dark = (peak_idx < 115 and near_peak / max(1, total_pixels) > 0.30)
+
+            if is_doc_light:
+                wp = float(peak_idx)
+                prob = counts.astype(np.float64) / max(1, total_pixels)
+                omega = np.cumsum(prob)
+                mu = np.cumsum(prob * np.arange(256))
+                denom = omega * (1.0 - omega)
+                denom[denom < 1e-9] = 1e-9
+                sigma_b = (mu[-1] * omega - mu)**2 / denom
+                otsu_th = int(np.argmax(sigma_b))
+
+                sub_counts = counts[:otsu_th]
+                sub_total = sub_counts.sum()
+                if sub_total > 0:
+                    sub_prob = sub_counts.astype(np.float64) / sub_total
+                    sub_omega = np.cumsum(sub_prob)
+                    sub_mu = np.cumsum(sub_prob * np.arange(otsu_th))
+                    sub_denom = sub_omega * (1.0 - sub_omega)
+                    sub_denom[sub_denom < 1e-9] = 1e-9
+                    sub_sigma = (sub_mu[-1] * sub_omega - sub_mu)**2 / sub_denom
+                    bp = float(np.argmax(sub_sigma))
+                else:
+                    bp = float(np.searchsorted(cum, 0.02 * total_pixels))
+
+                if wp <= bp + 20.0:
+                    bp = float(np.searchsorted(cum, 0.02 * total_pixels))
+                    wp = float(np.searchsorted(cum, 0.98 * total_pixels))
+            elif is_doc_dark:
+                bp = float(peak_idx)
+                prob = counts.astype(np.float64) / max(1, total_pixels)
+                omega = np.cumsum(prob)
+                mu = np.cumsum(prob * np.arange(256))
+                denom = omega * (1.0 - omega)
+                denom[denom < 1e-9] = 1e-9
+                sigma_b = (mu[-1] * omega - mu)**2 / denom
+                otsu_th = int(np.argmax(sigma_b))
+
+                sub_counts = counts[otsu_th:]
+                sub_total = sub_counts.sum()
+                if sub_total > 0:
+                    sub_prob = sub_counts.astype(np.float64) / sub_total
+                    sub_omega = np.cumsum(sub_prob)
+                    sub_mu = np.cumsum(sub_prob * np.arange(256 - otsu_th))
+                    sub_denom = sub_omega * (1.0 - sub_omega)
+                    sub_denom[sub_denom < 1e-9] = 1e-9
+                    sub_sigma = (sub_mu[-1] * sub_omega - sub_mu)**2 / sub_denom
+                    wp = float(otsu_th + np.argmax(sub_sigma))
+                else:
+                    wp = float(np.searchsorted(cum, 0.98 * total_pixels))
+
+                if wp <= bp + 20.0:
+                    bp = float(np.searchsorted(cum, 0.02 * total_pixels))
+                    wp = float(np.searchsorted(cum, 0.98 * total_pixels))
+            else:
+                bp = float(np.searchsorted(cum, 0.015 * total_pixels))
+                wp = float(np.searchsorted(cum, 0.985 * total_pixels))
+
+            lut = np.arange(256, dtype=np.float32)
+            scale = 255.0 / max(wp - bp, 15.0)
+            stretched = np.clip((lut - bp) * scale, 0.0, 255.0)
+            c = 20.0
+            c_factor = (259.0 * (c + 255.0)) / (255.0 * (259.0 - c))
+            gray_lut = np.clip(128.0 + c_factor * (stretched - 128.0), 0.0, 255.0).astype(np.uint8)
+            luma_out = gray_lut[luma_arr]
+
+        arr[0::4] = luma_out
+        arr[1::4] = luma_out
+        arr[2::4] = luma_out
+
+    # 5. Exposure Warning
+    if exposure_warning:
+        if not grayscale:
+            b_ch = arr[0::4].astype(np.float32)
+            g_ch = arr[1::4].astype(np.float32)
+            r_ch = arr[2::4].astype(np.float32)
+            luma_vals = 0.299 * r_ch + 0.587 * g_ch + 0.114 * b_ch
+        else:
+            luma_vals = luma_out
+        blown = luma_vals >= 254
+        crushed = luma_vals <= 1
+        if np.any(blown):
+            arr[0::4][blown] = 255  # Blue
+            arr[1::4][blown] = 0
+            arr[2::4][blown] = 0
+        if np.any(crushed):
+            arr[0::4][crushed] = 0
+            arr[1::4][crushed] = 0
+            arr[2::4][crushed] = 255  # Red
+
+    return out
+
+
+class AsyncAdjustmentPromotionWorker(QThread):
+    """Background worker to process full-resolution 80MP adjustments without blocking UI (ACDSee style)."""
+    promoted = pyqtSignal(int, object)  # (task_id, full_qimg)
+
+    def __init__(self, base_qimg: QImage, params: dict, is_inverted: bool, current_rotation: int, task_id: int, parent=None):
+        super().__init__(parent)
+        self.base_qimg = base_qimg
+        self.params = params
+        self.is_inverted = is_inverted
+        self.current_rotation = current_rotation
+        self.task_id = task_id
+
+    def run(self):
+        try:
+            if self.isInterruptionRequested():
+                return
+            full_qimg = _compute_adjustments_fast(
+                self.base_qimg, self.params, self.is_inverted, check_interrupted=self.isInterruptionRequested
+            )
+            if self.isInterruptionRequested() or full_qimg is None or full_qimg.isNull():
+                return
+
+            if self.current_rotation != 0:
+                rot_transform = QTransform().rotate(self.current_rotation)
+                full_qimg = full_qimg.transformed(rot_transform, Qt.TransformationMode.SmoothTransformation)
+
+            if not self.isInterruptionRequested():
+                self.promoted.emit(self.task_id, full_qimg)
         except Exception:
             pass
 
@@ -872,7 +1221,7 @@ class SPSImageViewerWindow(QMainWindow):
         # Keeps only QImage in RAM (no duplicate QPixmaps) to prevent multi-gigabyte memory inflation.
         self._decode_cache: dict = {}          # file_path -> {"qimg": QImage, "pixmap": None, "metadata": dict}
         self._decode_cache_order: list = []    # oldest-first LRU order
-        self._decode_cache_limit: int = 2
+        self._decode_cache_limit: int = 4
         self._zoom_mode: str = "fit"
         self._cached_luma: Optional[np.ndarray] = None
         self._prefetch_queue = ImagePrefetchQueueWorker(self.current_passphrase, self)
@@ -889,7 +1238,9 @@ class SPSImageViewerWindow(QMainWindow):
         self.current_pixmap: Optional[QPixmap] = None
         self.base_pixmap: Optional[QPixmap] = None
         self.base_qimage: Optional[QImage] = None  # RAM base frame cache
-        self.base_proxy_qimage: Optional[QImage] = None  # Fast 1920x1080 proxy for 60 FPS live slider drags
+        self.base_proxy_qimage: Optional[QImage] = None  # Fast 2560px smooth proxy for 60 FPS live slider drags
+        self._adj_promotion_worker: Optional[AsyncAdjustmentPromotionWorker] = None
+        self._adj_task_id: int = 0
         self._is_live_adjusting: bool = False
         self._adj_live_timer = QTimer(self)
         self._adj_live_timer.setSingleShot(True)
@@ -2586,8 +2937,7 @@ class SPSImageViewerWindow(QMainWindow):
                 with self._prefetch_queue._lock:
                     self._prefetch_queue._completed_cache.pop(oldest, None)
 
-        if evicted:
-            _trim_process_memory()
+        # Cache eviction is handled cleanly by Python reference counting without thrashing system memory
 
     def _join_in_flight_prefetch(self, file_path: str):
         """Instant zero-wait check in decode cache and prefetch worker cache."""
@@ -2669,8 +3019,8 @@ class SPSImageViewerWindow(QMainWindow):
 
         num_files = len(self.folder_files)
         idx = self.current_folder_index
-        # Prefetch immediate neighbor in navigation direction to keep RAM low and navigation instant
-        candidates = [idx + 1] if direction >= 0 else [idx - 1]
+        # Prefetch immediate neighbors in both directions to keep RAM low and navigation instant
+        candidates = [idx + 1, idx - 1] if direction >= 0 else [idx - 1, idx + 1]
 
         to_fetch = []
         for i in candidates:
@@ -2769,7 +3119,6 @@ class SPSImageViewerWindow(QMainWindow):
         self._render_scene_pixmap(fit=False if preserve_view else True, force_full=False)
 
         self.load_duration_sec = time.time() - t0
-        _trim_process_memory()
 
         if preserve_view:
             if saved_zoom_mode == "100":
@@ -2832,8 +3181,8 @@ class SPSImageViewerWindow(QMainWindow):
 
         w = self.base_qimage.width()
         h = self.base_qimage.height()
-        # Fast proxy: only used for ultra-large images (>3840px / 4K) during live fast slider dragging
-        if w > 3840 or h > 3840:
+        # Fast proxy: used for 60 FPS interactive slider dragging on images > 2560px
+        if w > 2560 or h > 2560:
             scale = min(2560.0 / w, 2560.0 / h)
             nw = max(1, int(w * scale))
             nh = max(1, int(h * scale))
@@ -2843,7 +3192,7 @@ class SPSImageViewerWindow(QMainWindow):
                 Qt.TransformationMode.SmoothTransformation
             ).convertToFormat(QImage.Format.Format_ARGB32)
         else:
-            self.base_proxy_qimage = None
+            self.base_proxy_qimage = self.base_qimage.convertToFormat(QImage.Format.Format_ARGB32)
 
     def _ensure_full_resolution(self):
         """Promote active preview image to 100% full-resolution master when zooming in or opening adjustments (ACDSee style)."""
@@ -3284,9 +3633,9 @@ class SPSImageViewerWindow(QMainWindow):
             self._pending_adj_render = False
             self._adj_live_timer.start(0)
 
-        # Trigger crystal-clear full resolution render as soon as dragging pauses
+        # Trigger background crystal-clear full resolution render as soon as dragging pauses
         if hasattr(self, '_adj_idle_timer'):
-            self._adj_idle_timer.start(80)
+            self._adj_idle_timer.start(120)
 
     def _on_adj_live_timeout(self):
         """Processes any pending catch-up frame after fast slider drag bursts."""
@@ -3303,333 +3652,67 @@ class SPSImageViewerWindow(QMainWindow):
         """Called when slider is released or preset/spinbox finishes or drag idles."""
         if getattr(self, "_is_rendering_adj", False):
             return
-        self._render_scene_pixmap(fit=False, force_full=True)
+
+        if not self._is_adjustment_active():
+            if self.base_pixmap is None or self.base_pixmap.isNull():
+                self.base_pixmap = QPixmap.fromImage(self.base_qimage)
+            self.current_pixmap = self.base_pixmap
+            self.pixmap_item.resetTransform()
+            self.pixmap_item.setPixmap(self.base_pixmap)
+            self.scene.setSceneRect(QRectF(self.base_pixmap.rect()))
+            self._update_status_bar()
+            return
+
+        # Moderate images (<= 2560px) render full directly (<20ms)
+        if self.base_qimage and self.base_qimage.width() <= 2560 and self.base_qimage.height() <= 2560:
+            self._render_scene_pixmap(fit=False, force_full=True)
+            self._update_status_bar()
+            return
+
+        # Ultra-large images (>2560px, e.g. 80MP): Launch background worker so GUI NEVER freezes!
+        self._start_async_adjustment_promotion()
+
+    def _start_async_adjustment_promotion(self):
+        if not self.base_qimage or self.base_qimage.isNull():
+            return
+        if not self._is_adjustment_active():
+            return
+
+        adj_params = self.sidebar.get_adjustment_params()
+
+        # Stop any existing promotion worker
+        if hasattr(self, '_adj_promotion_worker') and self._adj_promotion_worker and self._adj_promotion_worker.isRunning():
+            try:
+                self._adj_promotion_worker.promoted.disconnect()
+            except Exception:
+                pass
+            self._adj_promotion_worker.requestInterruption()
+
+        self._adj_task_id = getattr(self, "_adj_task_id", 0) + 1
+        curr_task_id = self._adj_task_id
+
+        self._adj_promotion_worker = AsyncAdjustmentPromotionWorker(
+            self.base_qimage, adj_params, self.is_inverted, self.current_rotation, curr_task_id, self
+        )
+        self._adj_promotion_worker.promoted.connect(self._on_async_adjustment_promoted)
+        self._adj_promotion_worker.start(QThread.Priority.LowPriority)
+
+    def _on_async_adjustment_promoted(self, task_id: int, full_qimg: QImage):
+        if getattr(self, '_is_closing', False) or getattr(self, "_adj_task_id", 0) != task_id:
+            return
+        if not full_qimg or full_qimg.isNull():
+            return
+
+        pix = QPixmap.fromImage(full_qimg)
+        self.current_pixmap = pix
+        self.pixmap_item.resetTransform()
+        self.pixmap_item.setPixmap(pix)
+        self.scene.setSceneRect(QRectF(pix.rect()))
         self._update_status_bar()
 
     def _apply_full_adjustments_fast(self, base_qimg: QImage, p: dict) -> QImage:
-        """
-        Ultra-Fast C-Level Vectorized NumPy Multi-Channel LUT Engine (<1ms latency).
-        Combines Invert, Brightness, Contrast, Gamma, Per-Channel RGB Levels, Per-Channel Curves.
-        """
-        if not base_qimg or base_qimg.isNull():
-            return base_qimg
-        auto_exp = p.get("auto_exposure", False)
-        auto_exp_strength = p.get("auto_exposure_strength", 0)  # 0 to 100
-        bright = p.get("brightness", 0)        # -100 to 100
-        contrast = p.get("contrast", 0)        # -100 to 100
-        gamma = p.get("gamma", 1.0)             # 0.1 to 3.0
-        grayscale = p.get("grayscale", False)
-        exposure_warning = p.get("exposure_warning", False)
-
-        levels = p.get("levels", {})
-        lum_lev = levels.get("Luminance", {"shadows": p.get("black_point", 0), "midtones": p.get("midtone_val", 1.0), "highlights": p.get("white_point", 255)})
-        red_lev = levels.get("Red", {"shadows": 0, "midtones": 1.0, "highlights": 255})
-        grn_lev = levels.get("Green", {"shadows": 0, "midtones": 1.0, "highlights": 255})
-        blu_lev = levels.get("Blue", {"shadows": 0, "midtones": 1.0, "highlights": 255})
-
-        curve_luts = p.get("curve_luts", {})
-        rgb_curve = curve_luts.get("RGB", p.get("curve_lut", None))
-        red_curve = curve_luts.get("Red", None)
-        grn_curve = curve_luts.get("Green", None)
-        blu_curve = curve_luts.get("Blue", None)
-
-        # Check if per-channel levels or curves are non-neutral
-        has_channel_levels = (
-            red_lev["shadows"] > 0 or red_lev["highlights"] < 255 or abs(red_lev["midtones"] - 1.0) > 0.01 or
-            grn_lev["shadows"] > 0 or grn_lev["highlights"] < 255 or abs(grn_lev["midtones"] - 1.0) > 0.01 or
-            blu_lev["shadows"] > 0 or blu_lev["highlights"] < 255 or abs(blu_lev["midtones"] - 1.0) > 0.01
-        )
-        has_curves = (rgb_curve is not None or red_curve is not None or grn_curve is not None or blu_curve is not None)
-
-        is_neutral = (
-            not self.is_inverted and not auto_exp and not grayscale and not exposure_warning
-            and not has_curves and not has_channel_levels
-            and bright == 0 and contrast == 0
-            and abs(gamma - 1.0) <= 0.01
-            and lum_lev["shadows"] <= 0 and lum_lev["highlights"] >= 255
-            and abs(lum_lev["midtones"] - 1.0) <= 0.01
-        )
-        if is_neutral:
-            return base_qimg
-
-        out = base_qimg.convertToFormat(QImage.Format.Format_ARGB32)
-        ptr = out.bits()
-        ptr.setsize(out.sizeInBytes())
-        arr = np.frombuffer(ptr, dtype=np.uint8)
-
-        # Auto Exposure Calculation
-        auto_contrast_color = p.get("auto_contrast_color", True)
-        if auto_exp and auto_exp_strength != 0:
-            factor = auto_exp_strength / 100.0
-            r_u = arr[2::4]
-            g_u = arr[1::4]
-            b_u = arr[0::4]
-
-            if factor > 0:
-                f = min(1.0, factor)
-                indices = np.arange(256, dtype=np.float32)
-                if auto_contrast_color:
-                    # Auto Contrast and Color:
-                    # 1. Per-channel stretch to balance RGB channels and normalize dynamic range
-                    # 2. Rich color vibrance and saturation enhancement so colors distinctly pop
-                    def _get_channel_limits(ch):
-                        sub = ch[::16] if len(ch) > 40000 else ch
-                        hist = np.bincount(sub, minlength=256)
-                        cum = np.cumsum(hist)
-                        tot = cum[-1]
-                        if tot == 0:
-                            return 0, 255
-                        p_min = int(np.searchsorted(cum, tot * 0.01))
-                        p_max = int(np.searchsorted(cum, tot * 0.99))
-                        return p_min, max(p_min + 1, p_max)
-
-                    r_min, r_max = _get_channel_limits(r_u)
-                    g_min, g_max = _get_channel_limits(g_u)
-                    b_min, b_max = _get_channel_limits(b_u)
-
-                    lut_r = np.clip((indices - r_min) * (255.0 / float(r_max - r_min)), 0.0, 255.0)
-                    lut_g = np.clip((indices - g_min) * (255.0 / float(g_max - g_min)), 0.0, 255.0)
-                    lut_b = np.clip((indices - b_min) * (255.0 / float(b_max - b_min)), 0.0, 255.0)
-
-                    r_s = lut_r[r_u]
-                    g_s = lut_g[g_u]
-                    b_s = lut_b[b_u]
-
-                    # Boost color saturation and vibrance so color is distinctly rich and vivid
-                    luma_s = 0.299 * r_s + 0.587 * g_s + 0.114 * b_s
-                    sat = 1.0 + 0.50 * f
-                    r_col = np.clip(luma_s + sat * (r_s - luma_s), 0.0, 255.0)
-                    g_col = np.clip(luma_s + sat * (g_s - luma_s), 0.0, 255.0)
-                    b_col = np.clip(luma_s + sat * (b_s - luma_s), 0.0, 255.0)
-
-                    arr[2::4] = np.clip((1.0 - f) * r_u.astype(np.float32) + f * r_col, 0, 255).astype(np.uint8)
-                    arr[1::4] = np.clip((1.0 - f) * g_u.astype(np.float32) + f * g_col, 0, 255).astype(np.uint8)
-                    arr[0::4] = np.clip((1.0 - f) * b_u.astype(np.float32) + f * b_col, 0, 255).astype(np.uint8)
-                else:
-                    # Auto Contrast:
-                    # Pure luminance-based contrast expansion with smooth S-curve tone mapping.
-                    # Preserves 100% original color balance, temperature, and natural saturation (no color shift/boost).
-                    sub_r = r_u[::16].astype(np.float32) if len(r_u) > 40000 else r_u.astype(np.float32)
-                    sub_g = g_u[::16].astype(np.float32) if len(g_u) > 40000 else g_u.astype(np.float32)
-                    sub_b = b_u[::16].astype(np.float32) if len(b_u) > 40000 else b_u.astype(np.float32)
-                    sub_y = (0.299 * sub_r + 0.587 * sub_g + 0.114 * sub_b).astype(np.uint8)
-
-                    hist_y = np.bincount(sub_y, minlength=256)
-                    cum_y = np.cumsum(hist_y)
-                    tot_y = cum_y[-1]
-                    if tot_y > 0:
-                        y_min = int(np.searchsorted(cum_y, tot_y * 0.01))
-                        y_max = int(np.searchsorted(cum_y, tot_y * 0.99))
-                    else:
-                        y_min, y_max = 0, 255
-                    y_max = max(y_min + 1, y_max)
-
-                    scale_y = 255.0 / float(y_max - y_min)
-                    stretched = np.clip((indices - y_min) * scale_y, 0.0, 255.0)
-                    norm = stretched / 255.0
-                    # Smooth S-curve contrast boost
-                    contrasted = 255.0 * (norm * norm * (3.0 - 2.0 * norm))
-                    lut_contrast = np.clip((1.0 - f) * indices + f * contrasted, 0.0, 255.0).astype(np.uint8)
-
-                    arr[2::4] = lut_contrast[r_u]
-                    arr[1::4] = lut_contrast[g_u]
-                    arr[0::4] = lut_contrast[b_u]
-            else:
-                f = max(-1.0, factor)
-                target = 128.0
-                arr[2::4] = np.clip((1.0 + f) * r_u.astype(np.float32) + (-f) * target, 0, 255).astype(np.uint8)
-                arr[1::4] = np.clip((1.0 + f) * g_u.astype(np.float32) + (-f) * target, 0, 255).astype(np.uint8)
-                arr[0::4] = np.clip((1.0 + f) * b_u.astype(np.float32) + (-f) * target, 0, 255).astype(np.uint8)
-
-        # 1. Base Master LUT (Invert, Contrast, Brightness, Master Gamma, Master Luminance Levels)
-        base_lut = np.arange(256, dtype=np.float32)
-
-        if self.is_inverted:
-            base_lut = 255.0 - base_lut
-
-        # Master Luminance Levels: Black point & White point scaling
-        black_pt = lum_lev["shadows"]
-        white_pt = lum_lev["highlights"]
-        midtone_val = lum_lev["midtones"]
-
-        if white_pt > black_pt and (black_pt > 0 or white_pt < 255):
-            base_lut = np.clip((base_lut - black_pt) * (255.0 / max(1.0, float(white_pt - black_pt))), 0.0, 255.0)
-
-        # Master Luminance Levels: Midtone Gamma adjustment
-        if abs(midtone_val - 1.0) > 0.01 and midtone_val > 0.05:
-            lut_norm = np.clip(base_lut / 255.0, 0.0, 1.0)
-            base_lut = np.clip((lut_norm ** (1.0 / midtone_val)) * 255.0, 0.0, 255.0)
-
-        if contrast != 0:
-            c_factor = (259.0 * (contrast + 255.0)) / (255.0 * (259.0 - contrast))
-            base_lut = np.clip(c_factor * (base_lut - 128.0) + 128.0, 0.0, 255.0)
-
-        if bright != 0:
-            base_lut = np.clip(base_lut + (bright * 1.5), 0.0, 255.0)
-
-        if gamma > 0 and abs(gamma - 1.0) > 0.01:
-            lut_norm = np.clip(base_lut / 255.0, 0.0, 1.0)
-            base_lut = np.clip((lut_norm ** (1.0 / gamma)) * 255.0, 0.0, 255.0)
-
-        # Master RGB Curve
-        if rgb_curve is not None:
-            base_lut = rgb_curve[np.clip(base_lut, 0, 255).astype(np.uint8)].astype(np.float32)
-
-        # 2. Branch Per-Channel LUTs for Red, Green, Blue
-        def _apply_channel_levels_and_curve(in_lut: np.ndarray, lev: dict, ch_curve: Optional[np.ndarray]) -> np.ndarray:
-            ch_lut = in_lut.copy()
-            s = lev.get("shadows", 0)
-            h = lev.get("highlights", 255)
-            m = lev.get("midtones", 1.0)
-            if h > s and (s > 0 or h < 255):
-                ch_lut = np.clip((ch_lut - s) * (255.0 / max(1.0, float(h - s))), 0.0, 255.0)
-            if abs(m - 1.0) > 0.01 and m > 0.05:
-                norm = np.clip(ch_lut / 255.0, 0.0, 1.0)
-                ch_lut = np.clip((norm ** (1.0 / m)) * 255.0, 0.0, 255.0)
-            ch_uint8 = np.clip(ch_lut, 0, 255).astype(np.uint8)
-            if ch_curve is not None:
-                ch_uint8 = ch_curve[ch_uint8]
-            return ch_uint8
-
-        lut_r = _apply_channel_levels_and_curve(base_lut, red_lev, red_curve)
-        lut_g = _apply_channel_levels_and_curve(base_lut, grn_lev, grn_curve)
-        lut_b = _apply_channel_levels_and_curve(base_lut, blu_lev, blu_curve)
-
-        # 3. Apply vectorized LUTs to C byte buffer only if LUT is non-neutral
-        has_lut_changes = (
-            self.is_inverted or auto_exp or bright != 0 or contrast != 0
-            or abs(gamma - 1.0) > 0.01 or lum_lev["shadows"] > 0
-            or lum_lev["highlights"] < 255 or abs(lum_lev["midtones"] - 1.0) > 0.01
-            or has_channel_levels or has_curves
-        )
-        if has_lut_changes:
-            arr[0::4] = lut_b[arr[0::4]]  # Blue
-            arr[1::4] = lut_g[arr[1::4]]  # Green
-            arr[2::4] = lut_r[arr[2::4]]  # Red
-
-        # 4. Grayscale & Binary Black & White
-        if grayscale:
-            if not has_lut_changes and self._cached_luma is not None and len(self._cached_luma) == out.width() * out.height():
-                luma_arr = self._cached_luma
-            else:
-                # High-speed SIMD BGRA to 8-bit Luma via Pillow (0.15s even for 81MP images)
-                w, h = out.width(), out.height()
-                pil_luma = PILImage.frombuffer('RGBA', (w, h), arr, 'raw', 'BGRA', 0, 1).convert('L')
-                luma_arr = np.asarray(pil_luma).ravel()
-                if not has_lut_changes:
-                    self._cached_luma = luma_arr
-
-            gray_mode = p.get("grayscale_mode", "full_range")
-            if gray_mode == "binary":
-                # Pure Black & White (Binary / 2-Tone via 256-entry threshold LUT)
-                thresh = int(p.get("bw_threshold", 128))
-                bw_lut = np.zeros(256, dtype=np.uint8)
-                bw_lut[thresh:] = 255
-                luma_out = bw_lut[luma_arr]
-            else:
-                # Full Range Grayscale (Pure Black to Pure White with rich photographic tonal depth)
-                # Sample 1-in-32 for histogram (sub-millisecond even on 81MP images)
-                sub_luma = luma_arr[::32] if len(luma_arr) > 40000 else luma_arr
-                counts = np.bincount(sub_luma, minlength=256)
-                total_pixels = len(sub_luma)
-                cum = np.cumsum(counts)
-
-                peak_idx = int(np.argmax(counts))
-                near_peak = counts[max(0, peak_idx - 15):min(256, peak_idx + 15)].sum()
-                is_doc_light = (peak_idx > 140 and near_peak / max(1, total_pixels) > 0.30)
-                is_doc_dark = (peak_idx < 115 and near_peak / max(1, total_pixels) > 0.30)
-
-                if is_doc_light:
-                    wp = float(peak_idx)
-                    prob = counts.astype(np.float64) / max(1, total_pixels)
-                    omega = np.cumsum(prob)
-                    mu = np.cumsum(prob * np.arange(256))
-                    denom = omega * (1.0 - omega)
-                    denom[denom < 1e-9] = 1e-9
-                    sigma_b = (mu[-1] * omega - mu)**2 / denom
-                    otsu_th = int(np.argmax(sigma_b))
-
-                    sub_counts = counts[:otsu_th]
-                    sub_total = sub_counts.sum()
-                    if sub_total > 0:
-                        sub_prob = sub_counts.astype(np.float64) / sub_total
-                        sub_omega = np.cumsum(sub_prob)
-                        sub_mu = np.cumsum(sub_prob * np.arange(otsu_th))
-                        sub_denom = sub_omega * (1.0 - sub_omega)
-                        sub_denom[sub_denom < 1e-9] = 1e-9
-                        sub_sigma = (sub_mu[-1] * sub_omega - sub_mu)**2 / sub_denom
-                        bp = float(np.argmax(sub_sigma))
-                    else:
-                        bp = float(np.searchsorted(cum, 0.02 * total_pixels))
-
-                    if wp <= bp + 20.0:
-                        bp = float(np.searchsorted(cum, 0.02 * total_pixels))
-                        wp = float(np.searchsorted(cum, 0.98 * total_pixels))
-                elif is_doc_dark:
-                    bp = float(peak_idx)
-                    prob = counts.astype(np.float64) / max(1, total_pixels)
-                    omega = np.cumsum(prob)
-                    mu = np.cumsum(prob * np.arange(256))
-                    denom = omega * (1.0 - omega)
-                    denom[denom < 1e-9] = 1e-9
-                    sigma_b = (mu[-1] * omega - mu)**2 / denom
-                    otsu_th = int(np.argmax(sigma_b))
-
-                    sub_counts = counts[otsu_th:]
-                    sub_total = sub_counts.sum()
-                    if sub_total > 0:
-                        sub_prob = sub_counts.astype(np.float64) / sub_total
-                        sub_omega = np.cumsum(sub_prob)
-                        sub_mu = np.cumsum(sub_prob * np.arange(256 - otsu_th))
-                        sub_denom = sub_omega * (1.0 - sub_omega)
-                        sub_denom[sub_denom < 1e-9] = 1e-9
-                        sub_sigma = (sub_mu[-1] * sub_omega - sub_mu)**2 / sub_denom
-                        wp = float(otsu_th + np.argmax(sub_sigma))
-                    else:
-                        wp = float(np.searchsorted(cum, 0.98 * total_pixels))
-
-                    if wp <= bp + 20.0:
-                        bp = float(np.searchsorted(cum, 0.02 * total_pixels))
-                        wp = float(np.searchsorted(cum, 0.98 * total_pixels))
-                else:
-                    bp = float(np.searchsorted(cum, 0.015 * total_pixels))
-                    wp = float(np.searchsorted(cum, 0.985 * total_pixels))
-
-                # Compute 256-element S-curve lookup table instead of 81-million float math
-                lut = np.arange(256, dtype=np.float32)
-                scale = 255.0 / max(wp - bp, 15.0)
-                stretched = np.clip((lut - bp) * scale, 0.0, 255.0)
-                c = 20.0
-                c_factor = (259.0 * (c + 255.0)) / (255.0 * (259.0 - c))
-                gray_lut = np.clip(128.0 + c_factor * (stretched - 128.0), 0.0, 255.0).astype(np.uint8)
-
-                luma_out = gray_lut[luma_arr]
-
-            arr[0::4] = luma_out
-            arr[1::4] = luma_out
-            arr[2::4] = luma_out
-
-        # 5. Exposure Warning (ACDSee: Highlights clipped blown-out whites in bright blue, crushed blacks in bright red)
-        if exposure_warning:
-            if not grayscale:
-                b_ch = arr[0::4].astype(np.float32)
-                g_ch = arr[1::4].astype(np.float32)
-                r_ch = arr[2::4].astype(np.float32)
-                luma_vals = 0.299 * r_ch + 0.587 * g_ch + 0.114 * b_ch
-            else:
-                luma_vals = luma_out
-            blown = luma_vals >= 254
-            crushed = luma_vals <= 1
-            if np.any(blown):
-                arr[0::4][blown] = 255  # Blue
-                arr[1::4][blown] = 0
-                arr[2::4][blown] = 0
-            if np.any(crushed):
-                arr[0::4][crushed] = 0
-                arr[1::4][crushed] = 0
-                arr[2::4][crushed] = 255  # Red
-
-        return out
+        """Vectorized LUT processor using top-level _compute_adjustments_fast."""
+        return _compute_adjustments_fast(base_qimg, p, self.is_inverted, self._cached_luma)
 
     def _render_scene_pixmap(self, fit: bool = False, force_full: bool = False, proxy: Optional[bool] = None):
         if not self.base_qimage or self.base_qimage.isNull():
