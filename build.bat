@@ -1,8 +1,10 @@
 @echo off
 setlocal
 
+set "VERSION=vBeta2"
+
 echo ============================================================
-echo  SPS TDM IMAGE VIEWER - EXE + INSTALLER BUILDER
+echo  SPS TDM IMAGE VIEWER - EXE + INSTALLER BUILDER (%VERSION%)
 echo ============================================================
 echo.
 
@@ -41,6 +43,9 @@ if not exist "dist\SPS_TDM_Image_Viewer\SPS_TDM_Image_Viewer.exe" (
     pause
     exit /b 1
 )
+
+REM Write version.txt into dist folder so Inno Setup bundles it
+echo %VERSION% > "dist\SPS_TDM_Image_Viewer\version.txt"
 
 echo.
 echo [4/4] Building the Windows installer (optional - needs Inno Setup)...
@@ -165,7 +170,7 @@ REM    It must match APP_VERSION in viewer_app.py and
 REM    CURRENT_APP_VERSION in updater.py  (e.g. v1.1 / v2.0)
 REM ============================================================
 
-set "VERSION=vBeta"
+set "VERSION=vBeta2"
 set "GITHUB_REPO=swiftprosystdm-png/Image_Viewer_App"
 
 echo.

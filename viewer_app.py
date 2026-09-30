@@ -64,7 +64,10 @@ from sps_crypto import (
 )
 from theme_config import setup_high_dpi, get_app_icon, get_light_stylesheet, get_theme_stylesheet, BASE_DIR
 from adjustment_sidebar import ImageAdjustmentSidebar
-from updater import check_for_updates_async, download_and_apply_update
+from updater import (
+    check_for_updates_async, download_and_apply_update, get_current_version,
+    is_newer_version, parse_version, CURRENT_APP_VERSION
+)
 
 import traceback
 
@@ -86,7 +89,7 @@ SUPPORTED_IMAGE_EXTENSIONS = {
 }
 ALL_SUPPORTED_EXTENSIONS = SUPPORTED_IMAGE_EXTENSIONS.union({".sps", ".pdf"})
 APP_TITLE = "SPS_TDM_Image_Viewer"
-APP_VERSION = "vBeta"
+APP_VERSION = get_current_version()
 
 
 def _background_decode_to_qimage(file_path: str, passphrase: str, max_dim: int = 2560) -> "tuple[QImage, dict]":
@@ -930,7 +933,7 @@ class SPSImageViewerWindow(QMainWindow):
         _trim_process_memory()
 
         # Check for updates silently on startup
-        check_for_updates_async(self, silent=True, callback=self._on_update_check_finished, current_version=APP_VERSION)
+        check_for_updates_async(self, silent=True, callback=self._on_update_check_finished, current_version=get_current_version())
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1206,7 +1209,7 @@ class SPSImageViewerWindow(QMainWindow):
         help_menu.addAction(shortcuts_action)
 
         update_act = QAction("Check for Updates...", self)
-        update_act.triggered.connect(lambda: check_for_updates_async(self, silent=False, callback=self._on_update_check_finished, current_version=APP_VERSION))
+        update_act.triggered.connect(lambda: check_for_updates_async(self, silent=False, callback=self._on_update_check_finished, current_version=get_current_version()))
         help_menu.addAction(update_act)
 
         about_act = QAction("About SPS Image Viewer", self)
@@ -1219,15 +1222,15 @@ class SPSImageViewerWindow(QMainWindow):
         corner_layout.setContentsMargins(0, 0, 6, 0)
         corner_layout.setSpacing(10)
 
-        version_lbl = QLabel(f"Version : {APP_VERSION}", self)
-        version_lbl.setStyleSheet("""
+        self.version_lbl = QLabel(f"Version : {get_current_version()}", self)
+        self.version_lbl.setStyleSheet("""
             QLabel {
                 color: #64748b;
                 font-size: 11px;
                 font-weight: 600;
             }
         """)
-        corner_layout.addWidget(version_lbl)
+        corner_layout.addWidget(self.version_lbl)
 
         self.btn_update = QPushButton("Check for Updates", self)
         self.btn_update.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -1280,21 +1283,34 @@ class SPSImageViewerWindow(QMainWindow):
             """)
 
     def _on_update_button_clicked(self):
-        if hasattr(self, '_latest_download_url') and self._latest_download_url:
+        curr_ver = get_current_version()
+        if self.btn_update.text().startswith("Update") and getattr(self, '_latest_download_url', None):
             ver = getattr(self, '_latest_version', 'new version')
-            prompt = f"A new version ({ver}) is available!\n\nDo you want to update now?"
-            reply = QMessageBox.question(self, "Update Available", prompt, 
-                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.Yes:
-                download_and_apply_update(self._latest_download_url, getattr(self, '_latest_asset_name', ''), self)
-        else:
-            check_for_updates_async(self, silent=False, callback=self._on_update_check_finished, current_version=APP_VERSION)
+            if is_newer_version(ver, curr_ver):
+                prompt = f"A new version ({ver}) is available!\n\nDo you want to update now?"
+                reply = QMessageBox.question(self, "Update Available", prompt, 
+                                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if reply == QMessageBox.StandardButton.Yes:
+                    download_and_apply_update(self._latest_download_url, getattr(self, '_latest_asset_name', ''), self, latest_version=ver)
+                return
+            else:
+                self._latest_download_url = None
+                self._latest_asset_name = None
+                self._latest_version = None
+                self.btn_update.setText("Check for Updates")
+                self._set_update_button_style(is_available=False)
+                
+        check_for_updates_async(self, silent=False, callback=self._on_update_check_finished, current_version=get_current_version())
 
     def _on_update_check_finished(self, success: bool, msg: str, download_url: str, asset_name: str, latest_version: str):
         """Callback when update check completes. Shows button with Update_{version} if an update is found."""
         if getattr(self, '_is_closing', False):
             return
-        if success and latest_version:
+        curr_ver = get_current_version()
+        if hasattr(self, 'version_lbl'):
+            self.version_lbl.setText(f"Version : {curr_ver}")
+            
+        if success and latest_version and is_newer_version(latest_version, curr_ver):
             self._latest_download_url = download_url
             self._latest_asset_name = asset_name
             self._latest_version = latest_version
@@ -3995,7 +4011,7 @@ class SPSImageViewerWindow(QMainWindow):
             self,
             "About SPS Image Viewer",
             f"<h3>{APP_TITLE}</h3>"
-            f"<p>Version: {APP_VERSION}</p>"
+            f"<p>Version: {get_current_version()}</p>"
             "<p>Classic enterprise document image viewing software featuring sub-millisecond "
             "vectorized image processing, right-side Image Adjustment Sidebar (Ctrl+L) "
             "Brightness, Contrast, Gamma, Levels, Curves, Multi-Theme Engine, and in-memory <b>.sps</b> decryption.</p>"

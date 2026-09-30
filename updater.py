@@ -17,7 +17,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 # ==========================================
 GITHUB_OWNER = "swiftprosystdm-png"
 GITHUB_REPO = "Image_Viewer_App"
-CURRENT_APP_VERSION = "vBeta"
+CURRENT_APP_VERSION = "vBeta2"
 GITHUB_FALLBACK_TOKEN = "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"
 
 
@@ -50,8 +50,83 @@ def parse_version(version_str):
     return (3,) + tuple(nums)
 
 
-def is_newer_version(latest, current=CURRENT_APP_VERSION):
+def get_installed_version_file_path():
+    """Returns user-writable path in AppData to record the installed version."""
+    local_app_data = os.environ.get("LOCALAPPDATA", "")
+    if local_app_data:
+        app_dir = os.path.join(local_app_data, "SPS_TDM_Image_Viewer")
+        os.makedirs(app_dir, exist_ok=True)
+        return os.path.join(app_dir, "installed_version.txt")
+    return None
+
+
+def record_installed_version(version_str):
+    """Persists the newly installed/updated version to local storage."""
+    if not version_str:
+        return
+    v_clean = str(version_str).strip()
+    try:
+        appdata_vfile = get_installed_version_file_path()
+        if appdata_vfile:
+            with open(appdata_vfile, "w", encoding="utf-8") as f:
+                f.write(v_clean)
+    except Exception:
+        pass
+        
+    try:
+        app_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.getcwd()
+        vfile = os.path.join(app_dir, "version.txt")
+        if is_writable_dir(app_dir):
+            with open(vfile, "w", encoding="utf-8") as f:
+                f.write(v_clean)
+    except Exception:
+        pass
+
+
+def get_current_version():
+    """
+    Dynamically resolves the active application version.
+    Priority:
+    1. App folder version.txt (bundled by installer next to exe)
+    2. LocalAppData installed_version.txt (persisted upon update)
+    3. CURRENT_APP_VERSION (source code constant)
+    """
+    candidate = CURRENT_APP_VERSION
+
+    # 1. Check version.txt in executable directory or current working directory
+    app_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else os.path.dirname(os.path.abspath(__file__))
+    for search_path in [
+        os.path.join(app_dir, "version.txt"),
+        os.path.join(app_dir, "_internal", "version.txt"),
+        os.path.join(os.getcwd(), "version.txt")
+    ]:
+        if os.path.isfile(search_path):
+            try:
+                with open(search_path, "r", encoding="utf-8") as f:
+                    v = f.read().strip()
+                    if v and parse_version(v) >= parse_version(candidate):
+                        candidate = v
+            except Exception:
+                pass
+
+    # 2. Check LocalAppData installed_version.txt
+    appdata_vfile = get_installed_version_file_path()
+    if appdata_vfile and os.path.isfile(appdata_vfile):
+        try:
+            with open(appdata_vfile, "r", encoding="utf-8") as f:
+                v = f.read().strip()
+                if v and parse_version(v) >= parse_version(candidate):
+                    candidate = v
+        except Exception:
+            pass
+
+    return candidate
+
+
+def is_newer_version(latest, current=None):
     """Returns True if latest version is newer than current version using semantic comparison."""
+    if current is None:
+        current = get_current_version()
     return parse_version(latest) > parse_version(current)
 
 
@@ -68,7 +143,7 @@ class CheckUpdateWorker(QThread):
     def __init__(self, silent=False, current_version=None):
         super().__init__()
         self.silent = silent
-        self.current_version = current_version or CURRENT_APP_VERSION
+        self.current_version = current_version or get_current_version()
         
     def run(self):
         repos_to_try = [GITHUB_REPO, "Image_Viewer_App", "SPS_TDM_Image_Viewer_App", "Image Viwer", "Image_Viewer", "Image-Viewer"]
@@ -76,6 +151,12 @@ class CheckUpdateWorker(QThread):
         headers = {"User-Agent": "SPS-Image-Viewer-App/1.0"}
         if token:
             headers["Authorization"] = f"token {token}"
+            try:
+                test_auth = requests.get("https://api.github.com/user", headers=headers, timeout=3)
+                if test_auth.status_code in (401, 403):
+                    headers.pop("Authorization", None)
+            except Exception:
+                headers.pop("Authorization", None)
         found_releases = []
         
         for repo in repos_to_try:
@@ -131,7 +212,7 @@ class CheckUpdateWorker(QThread):
                     pass
 
         if not found_releases:
-            self.finished.emit(False, f"You are running version {self.current_version}.\nNo published release tags found on GitHub repository.", "", "", "")
+            self.finished.emit(False, f"You are running the latest version ({self.current_version}).", "", "", "")
             return
 
         try:
@@ -223,11 +304,12 @@ def check_for_updates_async(parent=None, silent=False, callback=None, current_ve
             callback(success, msg, download_url, asset_name, latest_version)
 
         if success:
-            prompt = f"A new version ({latest_version}) is available!\n\nDo you want to update now?"
-            reply = QMessageBox.question(parent, "Update Available", prompt, 
-                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.Yes:
-                download_and_apply_update(download_url, asset_name, parent)
+            if not silent:
+                prompt = f"A new version ({latest_version}) is available!\n\nDo you want to update now?"
+                reply = QMessageBox.question(parent, "Update Available", prompt, 
+                                            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if reply == QMessageBox.StandardButton.Yes:
+                    download_and_apply_update(download_url, asset_name, parent, latest_version=latest_version)
         else:
             if parent and not silent:
                 if "Error" in msg:
@@ -260,15 +342,28 @@ def is_writable_dir(dir_path):
         return False
 
 
-def download_and_apply_update(download_url, asset_name, parent):
+def download_and_apply_update(download_url, asset_name, parent, latest_version=None):
     """Downloads the file and creates a batch script to replace the current executable cleanly."""
     try:
         token = os.environ.get("GITHUB_TOKEN", "").strip() or GITHUB_FALLBACK_TOKEN
         headers = {"User-Agent": "SPS-Image-Viewer-App/1.0", "Accept": "application/octet-stream"}
+        
+        response = None
         if token:
-            headers["Authorization"] = f"token {token}"
-        response = requests.get(download_url, headers=headers, stream=True, timeout=15)
-        response.raise_for_status()
+            try:
+                headers["Authorization"] = f"token {token}"
+                res = requests.get(download_url, headers=headers, stream=True, timeout=15)
+                if res.status_code == 200:
+                    response = res
+                else:
+                    headers.pop("Authorization", None)
+            except Exception:
+                headers.pop("Authorization", None)
+
+        if response is None:
+            response = requests.get(download_url, headers=headers, stream=True, timeout=15)
+            response.raise_for_status()
+
         total_size = int(response.headers.get('content-length', 0))
         
         progress = QProgressDialog("Downloading Update...", "Cancel", 0, total_size, parent)
@@ -317,6 +412,10 @@ def download_and_apply_update(download_url, asset_name, parent):
                 
         progress.close()
 
+        # Persist version to user AppData
+        if latest_version:
+            record_installed_version(latest_version)
+
         # Prepare environment copy stripping all PyInstaller/MEI variables
         env = os.environ.copy()
         for key in list(env.keys()):
@@ -332,6 +431,7 @@ def download_and_apply_update(download_url, asset_name, parent):
                 ctypes.windll.shell32.ShellExecuteW(None, "runas", new_exe_path, "/SILENT /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS", None, 1)
             os._exit(0)
 
+        version_write_line = f'echo {latest_version} > "{os.path.join(app_dir, "version.txt")}"' if latest_version else ''
         bat_content = f"""@echo off
 set _MEIPASS=
 set _MEIPASS2=
@@ -344,6 +444,7 @@ if exist "{target_path}" (
 )
 copy /y "{new_exe_path}" "{target_path}" >nul
 del /f /q "{new_exe_path}"
+{version_write_line}
 explorer.exe "{target_path}"
 del "%~f0"
 """
