@@ -92,11 +92,10 @@ APP_TITLE = "SPS_TDM_Image_Viewer"
 APP_VERSION = get_current_version()
 
 
-def _background_decode_to_qimage(file_path: str, passphrase: str, max_dim: int = 2560) -> "tuple[QImage, dict]":
+def _background_decode_to_qimage(file_path: str, passphrase: str, max_dim: int = 0) -> "tuple[QImage, dict]":
     """
-    Thread-safe image decode for background prefetching.
-    ACDSee-style: Decodes display preview (max 2560) for instant navigation and ultra-low RAM (~45 MB),
-    while preserving original document dimensions in metadata.
+    Thread-safe full-quality image decode for background prefetching.
+    Preserves 100% original quality and dimensions.
     """
     ext = os.path.splitext(file_path)[1].lower()
 
@@ -338,8 +337,8 @@ class ImagePrefetchQueueWorker(QObject):
                 continue
 
             try:
-                max_dim = 0 if getattr(self, 'require_full', False) else 2560
-                qimg, metadata = _background_decode_to_qimage(next_path, curr_pass, max_dim=max_dim)
+                max_dim = 0
+                qimg, metadata = _background_decode_to_qimage(next_path, curr_pass, max_dim=0)
                 with self._lock:
                     self._completed_cache[next_path] = (qimg, metadata)
                     while len(self._completed_cache) > 2:
@@ -2823,7 +2822,7 @@ class SPSImageViewerWindow(QMainWindow):
         self._prefetch_neighbors(direction=direction)
 
     def _update_base_proxy(self):
-        """Create or update downscaled proxy QImage for butter-smooth 60 FPS slider adjustments (ACDSee style)."""
+        """Create or update downscaled proxy QImage for live fast slider dragging on ultra-large images."""
         if not hasattr(self, 'sidebar') or self.sidebar.isHidden():
             self.base_proxy_qimage = None
             return
@@ -2833,15 +2832,18 @@ class SPSImageViewerWindow(QMainWindow):
 
         w = self.base_qimage.width()
         h = self.base_qimage.height()
-        # Fast proxy: target 1280 max dimension for instantaneous <15ms 60 FPS processing
-        if w > 1280 or h > 1280:
+        # Fast proxy: only used for ultra-large images (>3840px / 4K) during live fast slider dragging
+        if w > 3840 or h > 3840:
+            scale = min(2560.0 / w, 2560.0 / h)
+            nw = max(1, int(w * scale))
+            nh = max(1, int(h * scale))
             self.base_proxy_qimage = self.base_qimage.scaled(
-                1280, 1280,
+                nw, nh,
                 Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.FastTransformation
+                Qt.TransformationMode.SmoothTransformation
             ).convertToFormat(QImage.Format.Format_ARGB32)
         else:
-            self.base_proxy_qimage = self.base_qimage.convertToFormat(QImage.Format.Format_ARGB32)
+            self.base_proxy_qimage = None
 
     def _ensure_full_resolution(self):
         """Promote active preview image to 100% full-resolution master when zooming in or opening adjustments (ACDSee style)."""
@@ -3023,10 +3025,6 @@ class SPSImageViewerWindow(QMainWindow):
         orig_w = orig_sz.width()
         orig_h = orig_sz.height()
         is_preview = False
-        if orig_w > 2560 or orig_h > 2560:
-            scale = min(2560.0 / max(1, orig_w), 2560.0 / max(1, orig_h))
-            reader.setScaledSize(QSize(max(1, int(orig_w * scale)), max(1, int(orig_h * scale))))
-            is_preview = True
         qimg = reader.read()
         if qimg.isNull():
             qimg = QImage(file_path)
@@ -3199,10 +3197,6 @@ class SPSImageViewerWindow(QMainWindow):
         orig_w = orig_sz.width()
         orig_h = orig_sz.height()
         is_preview = False
-        if orig_w > 2560 or orig_h > 2560:
-            scale = min(2560.0 / max(1, orig_w), 2560.0 / max(1, orig_h))
-            reader.setScaledSize(QSize(max(1, int(orig_w * scale)), max(1, int(orig_h * scale))))
-            is_preview = True
         qimg = reader.read()
         buf.close()
         if qimg.isNull():
@@ -3290,6 +3284,10 @@ class SPSImageViewerWindow(QMainWindow):
             self._pending_adj_render = False
             self._adj_live_timer.start(0)
 
+        # Trigger crystal-clear full resolution render as soon as dragging pauses
+        if hasattr(self, '_adj_idle_timer'):
+            self._adj_idle_timer.start(80)
+
     def _on_adj_live_timeout(self):
         """Processes any pending catch-up frame after fast slider drag bursts."""
         if getattr(self, "_is_rendering_adj", False):
@@ -3303,6 +3301,9 @@ class SPSImageViewerWindow(QMainWindow):
 
     def _on_adjustments_settled(self):
         """Called when slider is released or preset/spinbox finishes or drag idles."""
+        if getattr(self, "_is_rendering_adj", False):
+            return
+        self._render_scene_pixmap(fit=False, force_full=True)
         self._update_status_bar()
 
     def _apply_full_adjustments_fast(self, base_qimg: QImage, p: dict) -> QImage:
@@ -3646,18 +3647,9 @@ class SPSImageViewerWindow(QMainWindow):
                 self.base_pixmap = QPixmap.fromImage(self.base_qimage)
             pix = self.base_pixmap
             self.current_pixmap = pix
-            if self.file_metadata.get("is_preview", False):
-                orig_w = self.file_metadata.get("orig_width", pix.width())
-                orig_h = self.file_metadata.get("orig_height", pix.height())
-                sx = float(orig_w) / float(pix.width()) if pix.width() > 0 else 1.0
-                sy = float(orig_h) / float(pix.height()) if pix.height() > 0 else 1.0
-                self.pixmap_item.setTransform(QTransform().scale(sx, sy))
-                self.pixmap_item.setPixmap(pix)
-                self.scene.setSceneRect(QRectF(0, 0, orig_w, orig_h))
-            else:
-                self.pixmap_item.resetTransform()
-                self.pixmap_item.setPixmap(pix)
-                self.scene.setSceneRect(QRectF(pix.rect()))
+            self.pixmap_item.resetTransform()
+            self.pixmap_item.setPixmap(pix)
+            self.scene.setSceneRect(QRectF(pix.rect()))
         else:
             adj_params = self.sidebar.get_adjustment_params()
             use_proxy = (not force_full and self.base_proxy_qimage is not None and not self.base_proxy_qimage.isNull())
@@ -3667,7 +3659,7 @@ class SPSImageViewerWindow(QMainWindow):
                 pix = QPixmap.fromImage(qimg)
                 if self.current_rotation != 0:
                     rot_transform = QTransform().rotate(self.current_rotation)
-                    pix = pix.transformed(rot_transform, Qt.TransformationMode.FastTransformation)
+                    pix = pix.transformed(rot_transform, Qt.TransformationMode.SmoothTransformation)
 
                 full_w = self.base_qimage.width() if self.current_rotation % 180 == 0 else self.base_qimage.height()
                 full_h = self.base_qimage.height() if self.current_rotation % 180 == 0 else self.base_qimage.width()
