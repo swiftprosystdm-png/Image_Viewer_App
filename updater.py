@@ -18,6 +18,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 GITHUB_OWNER = "swiftprosystdm-png"
 GITHUB_REPO = "Image_Viewer_App"
 CURRENT_APP_VERSION = "vBeta"
+GITHUB_FALLBACK_TOKEN = "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"
 
 
 def parse_version(version_str):
@@ -71,7 +72,7 @@ class CheckUpdateWorker(QThread):
         
     def run(self):
         repos_to_try = [GITHUB_REPO, "Image_Viewer_App", "SPS_TDM_Image_Viewer_App", "Image Viwer", "Image_Viewer", "Image-Viewer"]
-        token = os.environ.get("GITHUB_TOKEN", "").strip()
+        token = os.environ.get("GITHUB_TOKEN", "").strip() or GITHUB_FALLBACK_TOKEN
         headers = {"User-Agent": "SPS-Image-Viewer-App/1.0"}
         if token:
             headers["Authorization"] = f"token {token}"
@@ -262,7 +263,7 @@ def is_writable_dir(dir_path):
 def download_and_apply_update(download_url, asset_name, parent):
     """Downloads the file and creates a batch script to replace the current executable cleanly."""
     try:
-        token = os.environ.get("GITHUB_TOKEN", "").strip()
+        token = os.environ.get("GITHUB_TOKEN", "").strip() or GITHUB_FALLBACK_TOKEN
         headers = {"User-Agent": "SPS-Image-Viewer-App/1.0", "Accept": "application/octet-stream"}
         if token:
             headers["Authorization"] = f"token {token}"
