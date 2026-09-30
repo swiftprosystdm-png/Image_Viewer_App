@@ -86,7 +86,7 @@ SUPPORTED_IMAGE_EXTENSIONS = {
 }
 ALL_SUPPORTED_EXTENSIONS = SUPPORTED_IMAGE_EXTENSIONS.union({".sps", ".pdf"})
 APP_TITLE = "SPS_TDM_Image_Viewer"
-APP_VERSION = "vvBeta"
+APP_VERSION = "vBeta"
 
 
 def _background_decode_to_qimage(file_path: str, passphrase: str, max_dim: int = 2560) -> "tuple[QImage, dict]":

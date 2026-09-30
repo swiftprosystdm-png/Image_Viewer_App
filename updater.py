@@ -17,7 +17,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 # ==========================================
 GITHUB_OWNER = "swiftprosystdm-png"
 GITHUB_REPO = "Image_Viewer_App"
-CURRENT_APP_VERSION = "vvBeta"
+CURRENT_APP_VERSION = "vBeta"
 
 
 def parse_version(version_str):
