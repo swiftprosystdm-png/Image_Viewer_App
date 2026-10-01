@@ -15,7 +15,7 @@
 ; ============================================================================
 
 #define MyAppName "SPS TDM Image Viewer"
-#define MyAppVersion "vBeta2"
+#define MyAppVersion "vBeta"
 #define MyAppPublisher "Swift-ProSys"
 #define MyAppExeName "SPS_TDM_Image_Viewer.exe"
 

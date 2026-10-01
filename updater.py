@@ -17,7 +17,7 @@ from PyQt6.QtCore import Qt, QThread, pyqtSignal
 # ==========================================
 GITHUB_OWNER = "swiftprosystdm-png"
 GITHUB_REPO = "Image_Viewer_App"
-CURRENT_APP_VERSION = "vBeta2"
+CURRENT_APP_VERSION = "vBeta"
 GITHUB_FALLBACK_TOKEN = "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"
 
 

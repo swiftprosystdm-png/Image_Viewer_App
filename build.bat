@@ -1,7 +1,7 @@
 @echo off
 setlocal
 
-set "VERSION=vBeta2"
+set "VERSION=vBeta"
 
 echo ============================================================
 echo  SPS TDM IMAGE VIEWER - EXE + INSTALLER BUILDER (%VERSION%)
@@ -170,7 +170,7 @@ REM    It must match APP_VERSION in viewer_app.py and
 REM    CURRENT_APP_VERSION in updater.py  (e.g. v1.1 / v2.0)
 REM ============================================================
 
-set "VERSION=vBeta2"
+set "VERSION=vBeta"
 set "GITHUB_REPO=swiftprosystdm-png/Image_Viewer_App"
 
 echo.

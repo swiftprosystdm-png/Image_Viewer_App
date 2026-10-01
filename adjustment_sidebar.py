@@ -466,6 +466,24 @@ class ImageAdjustmentSidebar(QFrame):
         self._last_committed_state = self.get_full_state()
         self._update_undo_redo_buttons()
 
+    def is_active_slider_drag(self) -> bool:
+        """Returns True if any slider or graph handle is actively being dragged by the mouse."""
+        sliders = [
+            getattr(self, 'slider_auto_exp', None),
+            getattr(self, 'slider_bright', None),
+            getattr(self, 'slider_contrast', None),
+            getattr(self, 'slider_gamma', None),
+            getattr(self, 'slider_bw_threshold', None),
+        ]
+        for s in sliders:
+            if s is not None and s.isSliderDown():
+                return True
+        if hasattr(self, 'curve_editor') and getattr(self.curve_editor, '_dragging_index', None) is not None:
+            return True
+        if hasattr(self, 'levels_hist') and getattr(self.levels_hist, '_dragging_handle', None) is not None:
+            return True
+        return False
+
     # ------------------------------------------------------------------
     def _wrap_in_scroll(self, widget: QWidget) -> QScrollArea:
         scroll = QScrollArea()
@@ -2006,4 +2024,5 @@ class ImageAdjustmentSidebar(QFrame):
             "exposure_warning": self._exposure_warning,
             "curve_lut": curve_luts.get("RGB"),
             "curve_luts": curve_luts,
+            "cached_histograms": self._cached_histograms,
         }
